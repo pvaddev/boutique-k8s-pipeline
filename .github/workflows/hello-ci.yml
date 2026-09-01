@@ -1,0 +1,23 @@
+# Starter workflow — read docs/github-actions-basics.md first.
+# This just proves the CI loop works end to end. Replace with the real
+# lint -> test -> build -> scan -> push pipeline in Phase 3.
+
+name: hello-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:   # lets you trigger it manually from the Actions tab
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: List changed services (manual check for now)
+        run: |
+          echo "Repo checked out at $(pwd)"
+          echo "Services present:"
+          ls src

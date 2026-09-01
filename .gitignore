@@ -1,0 +1,35 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!**/*.tfvars.example
+crash.log
+
+# Kubernetes / kubeconfig
+kubeconfig*
+*.kubeconfig
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+compose.override.yml
+# exported/saved images (docker save)
+*.tar
+# local env files (keep *.env.example)
+.env
+!*.env.example
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Language build artifacts (adjust as you add Dockerfiles per service)
+node_modules/
+__pycache__/
+*.pyc
+bin/
+obj/
+target/
+*.class
