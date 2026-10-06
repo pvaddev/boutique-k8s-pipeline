@@ -17,7 +17,7 @@ Consequences for how to work here:
 
 Phase 1 (Containerize). Dockerfiles exist for `cartservice` and `adservice` only; the other ten services and the compose file are still to do. The whole shop cannot be run yet.
 
-`.github/workflows/hello-ci.yml` is a starter that only lists `src/`. Its push trigger targets `main`, but this repo's branch is `master`, so it only runs on PRs and manual dispatch.
+`.github/workflows/hello-ci.yml` is a starter that only lists `src/`. It runs on pushes to `master`, on PRs, and on manual dispatch.
 
 ## Commands
 

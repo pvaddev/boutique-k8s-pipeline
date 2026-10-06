@@ -37,12 +37,6 @@ are placeholders that describe what will be built there.
 | 5 | GitOps CD | Not started — `gitops/argocd` contains only a README |
 | 6–9 | Mesh, observability, policy, progressive delivery | Not started |
 
-### Known gaps
-
-- `hello-ci.yml` triggers on pushes to `main`, but this repo's branch is
-  `master`, so the push trigger never fires. Pull request and manual
-  (`workflow_dispatch`) runs still work.
-
 ## The application
 
 Online Boutique is a demo web shop: users browse a product catalog, add items
