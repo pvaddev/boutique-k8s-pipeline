@@ -30,7 +30,7 @@ are placeholders that describe what will be built there.
 | Phase | Topic | State |
 |---|---|---|
 | 0 | Repo hygiene | Done — source only, upstream tooling removed |
-| 1 | Containerize | In progress — 2 of 12 services have a Dockerfile (`cartservice`, `adservice`); no compose file yet |
+| 1 | Containerize | In progress — 4 of 12 services have a Dockerfile (`cartservice`, `adservice`, `checkoutservice`, `currencyservice`); no compose file yet |
 | 2 | Infra as Code | Not started — `infra/kubeadm-dev` and `infra/eks-prod` contain only a README |
 | 3 | CI | Starter only — `.github/workflows/hello-ci.yml` checks out the repo and lists `src/` |
 | 4 | Kubernetes manifests | Not started — `k8s/base` and `k8s/overlays/*` contain only a README |
@@ -51,7 +51,7 @@ subject for practising multi-service builds and deployments.
 | `frontend` | Go 1.25 | HTTP | 8080 | Serves the website and calls every backend service. Health endpoint: `/_healthz` |
 | `cartservice` | C# / .NET 10 | gRPC | 7070 (set in its Dockerfile) | Stores and retrieves a user's cart, in Redis or in memory |
 | `productcatalogservice` | Go 1.25 | gRPC | 3550 | Lists, fetches, and searches products from `products.json` |
-| `currencyservice` | Node.js | gRPC | none — `PORT` is required | Converts money between currencies using a static rates file |
+| `currencyservice` | Node.js 24 | gRPC | none in the source — `PORT` is required; its Dockerfile sets 7000 | Converts money between currencies using a static rates file |
 | `paymentservice` | Node.js | gRPC | none — `PORT` is required | Mock-charges a credit card and returns a transaction ID |
 | `shippingservice` | Go 1.25 | gRPC | 50051 | Returns a shipping quote and a mock tracking ID |
 | `emailservice` | Python | gRPC | 8080 | Sends an order confirmation (runs in dummy mode: it only logs) |
@@ -169,6 +169,8 @@ Planned delivery flow:
 src/                   Application source from upstream, plus the Dockerfiles written here
   adservice/Dockerfile          Java service image
   cartservice/src/Dockerfile    .NET service image (build context is cartservice/src)
+  checkoutservice/Dockerfile    Go service image
+  currencyservice/Dockerfile    Node.js service image
 protos/                gRPC service definitions (needed to build src/*)
 infra/
   kubeadm-dev/         Scripts/Ansible to stand up the dev cluster with kubeadm   (planned)
@@ -209,13 +211,41 @@ docker build -t adservice:dev src/adservice
 docker run --rm -p 9555:9555 -e DISABLE_STATS=1 -e DISABLE_TRACING=1 adservice:dev
 ```
 
-Both services speak gRPC only, so a browser will not show anything. Check
-them with [`grpcurl`](https://github.com/fullstorydev/grpcurl) against the
-shared proto:
+`checkoutservice` — it exits at startup unless all six backend addresses are
+set. It only connects when an order is placed, so placeholders are enough to
+start it on its own:
 
 ```sh
+docker build -t checkoutservice:dev src/checkoutservice
+docker run --rm -p 5050:5050 \
+  -e SHIPPING_SERVICE_ADDR=localhost:1 -e PRODUCT_CATALOG_SERVICE_ADDR=localhost:1 \
+  -e CART_SERVICE_ADDR=localhost:1 -e CURRENCY_SERVICE_ADDR=localhost:1 \
+  -e EMAIL_SERVICE_ADDR=localhost:1 -e PAYMENT_SERVICE_ADDR=localhost:1 \
+  checkoutservice:dev
+```
+
+`currencyservice` — the image sets `PORT=7000` and `DISABLE_PROFILER=1`:
+
+```sh
+docker build -t currencyservice:dev src/currencyservice
+docker run --rm -p 7000:7000 currencyservice:dev
+```
+
+All of these speak gRPC only, so a browser will not show anything. Check
+them with [`grpcurl`](https://github.com/fullstorydev/grpcurl) against the
+shared protos:
+
+```sh
+# health check, works for every gRPC service (change the port)
+grpcurl -plaintext -import-path protos -proto grpc/health/v1/health.proto \
+  localhost:5050 grpc.health.v1.Health/Check
+
 grpcurl -plaintext -import-path protos -proto demo.proto \
   -d '{"context_keys": ["clothing"]}' localhost:9555 hipstershop.AdService/GetAds
+
+grpcurl -plaintext -import-path protos -proto demo.proto \
+  -d '{"from": {"currency_code": "USD", "units": 10}, "to_code": "EUR"}' \
+  localhost:7000 hipstershop.CurrencyService/Convert
 ```
 
 ### Run the unit tests
@@ -235,28 +265,37 @@ The Java, Node.js, and Python services ship without unit tests.
 
 ### Running the whole shop
 
-Not possible yet. It needs the remaining ten Dockerfiles and the compose file
+Not possible yet. It needs the remaining eight Dockerfiles and the compose file
 planned for Phase 1; the [configuration reference](#configuration-reference)
 lists the wiring each service will need.
 
 ## Containerization conventions
 
-The two existing Dockerfiles set the pattern for the rest:
+The four existing Dockerfiles set the pattern for the rest:
 
-- **Multi-stage builds** — an SDK/JDK stage compiles, and a smaller runtime
-  stage (`aspnet`, `jre`) carries only the output.
-- **Dependencies before source** — the project file (`cartservice.csproj`,
-  `build.gradle`) is copied and restored first, so that layer stays cached
-  until dependencies actually change.
-- **Non-root user** — the runtime stage switches to an unprivileged user.
-- **A `.dockerignore` per service** — keeps build output and editor files out
-  of the build context.
+- **Multi-stage builds** — a build stage with the SDK or compiler, and a
+  smaller runtime stage that carries only the output: `aspnet` and `jre` for
+  .NET and Java, distroless for Go (`static-debian12`) and Node.js
+  (`nodejs24-debian12`).
+- **Base images pinned by digest** — `image:tag@sha256:...`, using the digest
+  of the multi-platform index (the top `Digest:` line of
+  `docker buildx imagetools inspect <image>:<tag>`).
+- **Dependencies before source** — the dependency manifest (`cartservice.csproj`,
+  `build.gradle`, `go.mod` + `go.sum`, `package.json` + `package-lock.json`)
+  is copied and restored first, so that layer stays cached until dependencies
+  actually change.
+- **Non-root numeric user** — `USER 10001`, `USER 65532` on distroless, or
+  `$APP_UID` on the .NET image.
+- **A `.dockerignore` per service** — keeps build output, `node_modules/`, and
+  editor files out of the build context.
 - **Port declared in the image** — `EXPOSE` plus the matching env var
   (`ASPNETCORE_URLS`, `PORT`).
 
-Still to apply from `docs/phases.md`: base images pinned by digest rather than
-tag, and distroless or otherwise minimal final stages where the language
-allows.
+One deviation: `currencyservice` installs with `npm ci --ignore-scripts`. Its
+locked `pprof` 4.0.0 native module (used only by Google Cloud Profiler) does
+not compile on Node 24, so the build is skipped and the image sets
+`DISABLE_PROFILER=1`. Unsetting that variable makes the container crash at
+startup.
 
 ## Roadmap
 

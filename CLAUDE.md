@@ -15,7 +15,7 @@ Consequences for how to work here:
 
 ## Current state
 
-Phase 1 (Containerize). Dockerfiles exist for `cartservice` and `adservice` only; the other ten services and the compose file are still to do. The whole shop cannot be run yet.
+Phase 1 (Containerize). Dockerfiles exist for `cartservice`, `adservice`, `checkoutservice`, and `currencyservice`; the other eight services and the compose file are still to do. The whole shop cannot be run yet.
 
 `.github/workflows/hello-ci.yml` is a starter that only lists `src/`. It runs on pushes to `master`, on PRs, and on manual dispatch.
 
@@ -30,11 +30,20 @@ docker run --rm -p 7070:7070 cartservice:dev            # add -e REDIS_ADDR=<hos
 
 docker build -t adservice:dev src/adservice
 docker run --rm -p 9555:9555 -e DISABLE_STATS=1 -e DISABLE_TRACING=1 adservice:dev
+
+# checkoutservice — needs all six *_SERVICE_ADDR vars; placeholders (localhost:1) are enough to start it
+docker build -t checkoutservice:dev src/checkoutservice
+
+# currencyservice — image sets PORT=7000 and DISABLE_PROFILER=1
+docker build -t currencyservice:dev src/currencyservice
+docker run --rm -p 7000:7000 currencyservice:dev
 ```
 
 Smoke-test a gRPC service (no browser UI) against the shared proto:
 
 ```sh
+grpcurl -plaintext -import-path protos -proto grpc/health/v1/health.proto \
+  localhost:<port> grpc.health.v1.Health/Check        # any gRPC service
 grpcurl -plaintext -import-path protos -proto demo.proto \
   -d '{"context_keys": ["clothing"]}' localhost:9555 hipstershop.AdService/GetAds
 ```
@@ -52,14 +61,17 @@ The Java, Node.js, and Python services have no tests (`npm test` is a stub that 
 
 ## Dockerfile conventions
 
-The two existing Dockerfiles set the pattern; follow it for the remaining services:
+The four existing Dockerfiles set the pattern; follow it for the remaining services, starting from the one in the same language where there is one:
 
-- Multi-stage: SDK/JDK build stage, slim runtime stage carrying only the build output. Prefer distroless/minimal final stages where the language allows.
-- Base images pinned by digest (`image:tag@sha256:...`), not tag alone.
-- Dependency manifest copied and restored before the source, so the dependency layer stays cached (`cartservice.csproj` → `dotnet restore`; `build.gradle` → `./gradlew downloadRepos`, a task that exists in `build.gradle` for exactly this).
-- Runtime runs as a non-root **numeric** UID (`USER 10001`, or `$APP_UID` on the .NET image) so Kubernetes `runAsNonRoot` can verify it.
+- Multi-stage: build stage with the SDK/compiler, minimal runtime stage carrying only the output. Go uses `gcr.io/distroless/static-debian12:nonroot` (static binary, `CGO_ENABLED=0`); Node.js uses `node:24-bookworm-slim` to install and `gcr.io/distroless/nodejs24-debian12:nonroot` to run (same libc in both stages; `CMD ["server.js"]` because the image's entrypoint is already `node`).
+- Base images pinned by digest (`image:tag@sha256:...`), not tag alone. Use the index digest — the top `Digest:` line of `docker buildx imagetools inspect <image>:<tag>`. The entries under `Manifests:` with platform `unknown/unknown` are attestations and fail the build.
+- Dependency manifest copied and restored before the source, so the dependency layer stays cached (`cartservice.csproj` → `dotnet restore`; `build.gradle` → `./gradlew downloadRepos`, a task that exists in `build.gradle` for exactly this; `go.mod` + `go.sum` → `go mod download`; `package.json` + `package-lock.json` → `npm ci --omit=dev`).
+- Runtime runs as a non-root **numeric** UID (`USER 10001`, `USER 65532` on distroless, or `$APP_UID` on the .NET image) so Kubernetes `runAsNonRoot` can verify it.
 - `EXPOSE` plus the matching port env var (`PORT`, `ASPNETCORE_URLS`) set in the image.
-- A `.dockerignore` next to each Dockerfile, excluding build output, editor files, and the Dockerfile itself.
+- A `.dockerignore` next to each Dockerfile, excluding build output, `node_modules/`, editor files, and the Dockerfile itself. It must not exclude files the service reads at runtime (`proto/`, `data/`).
+- Distroless images have no shell: use exec-form `ENTRYPOINT`/`CMD`, and check the user with `docker inspect -f '{{.Config.User}}'` rather than `docker exec`.
+
+Node-specific: `currencyservice` installs with `npm ci --omit=dev --ignore-scripts` and sets `ENV DISABLE_PROFILER=1` in the runtime stage. Its locked `pprof` 4.0.0 (a native module used only by Cloud Profiler) has no prebuilt binary for Node 24 and does not compile against it, so the install script is skipped; without `DISABLE_PROFILER` the container crashes at startup. `paymentservice` also depends on `pprof` (5.0.0) — check whether it builds before reusing this workaround.
 
 Before writing a service's Dockerfile, check its build file (`go.mod`, `package.json`, `requirements.txt`, `*.csproj`, `build.gradle`) for the runtime version.
 
