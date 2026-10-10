@@ -30,7 +30,7 @@ are placeholders that describe what will be built there.
 | Phase | Topic | State |
 |---|---|---|
 | 0 | Repo hygiene | Done — source only, upstream tooling removed |
-| 1 | Containerize | In progress — 4 of 12 services have a Dockerfile (`cartservice`, `adservice`, `checkoutservice`, `currencyservice`); no compose file yet |
+| 1 | Containerize | In progress — 5 of 12 services have a Dockerfile (`cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`); no compose file yet |
 | 2 | Infra as Code | Not started — `infra/kubeadm-dev` and `infra/eks-prod` contain only a README |
 | 3 | CI | Starter only — `.github/workflows/hello-ci.yml` checks out the repo and lists `src/` |
 | 4 | Kubernetes manifests | Not started — `k8s/base` and `k8s/overlays/*` contain only a README |
@@ -54,7 +54,7 @@ subject for practising multi-service builds and deployments.
 | `currencyservice` | Node.js 24 | gRPC | none in the source — `PORT` is required; its Dockerfile sets 7000 | Converts money between currencies using a static rates file |
 | `paymentservice` | Node.js | gRPC | none — `PORT` is required | Mock-charges a credit card and returns a transaction ID |
 | `shippingservice` | Go 1.25 | gRPC | 50051 | Returns a shipping quote and a mock tracking ID |
-| `emailservice` | Python | gRPC | 8080 | Sends an order confirmation (runs in dummy mode: it only logs) |
+| `emailservice` | Python 3.11 | gRPC | 8080 | Sends an order confirmation (runs in dummy mode: it only logs) |
 | `checkoutservice` | Go 1.25 | gRPC | 5050 | Orchestrates an order: cart, pricing, payment, shipping, email |
 | `recommendationservice` | Python | gRPC | 8080 | Suggests other products based on what is in the cart |
 | `adservice` | Java 21 (Gradle 8) | gRPC | 9555 | Returns text ads matched to context keywords |
@@ -171,6 +171,7 @@ src/                   Application source from upstream, plus the Dockerfiles wr
   cartservice/src/Dockerfile    .NET service image (build context is cartservice/src)
   checkoutservice/Dockerfile    Go service image
   currencyservice/Dockerfile    Node.js service image
+  emailservice/Dockerfile       Python service image
 protos/                gRPC service definitions (needed to build src/*)
 infra/
   kubeadm-dev/         Scripts/Ansible to stand up the dev cluster with kubeadm   (planned)
@@ -231,6 +232,14 @@ docker build -t currencyservice:dev src/currencyservice
 docker run --rm -p 7000:7000 currencyservice:dev
 ```
 
+`emailservice` — the image sets `PORT=8080` and `DISABLE_PROFILER=1`. It runs
+in dummy mode: a request is logged, no email is sent:
+
+```sh
+docker build -t emailservice:dev src/emailservice
+docker run --rm -p 8080:8080 emailservice:dev
+```
+
 All of these speak gRPC only, so a browser will not show anything. Check
 them with [`grpcurl`](https://github.com/fullstorydev/grpcurl) against the
 shared protos:
@@ -246,6 +255,10 @@ grpcurl -plaintext -import-path protos -proto demo.proto \
 grpcurl -plaintext -import-path protos -proto demo.proto \
   -d '{"from": {"currency_code": "USD", "units": 10}, "to_code": "EUR"}' \
   localhost:7000 hipstershop.CurrencyService/Convert
+
+grpcurl -plaintext -import-path protos -proto demo.proto \
+  -d '{"email": "someone@example.com", "order": {"order_id": "1"}}' \
+  localhost:8080 hipstershop.EmailService/SendOrderConfirmation
 ```
 
 ### Run the unit tests
@@ -265,23 +278,24 @@ The Java, Node.js, and Python services ship without unit tests.
 
 ### Running the whole shop
 
-Not possible yet. It needs the remaining eight Dockerfiles and the compose file
+Not possible yet. It needs the remaining seven Dockerfiles and the compose file
 planned for Phase 1; the [configuration reference](#configuration-reference)
 lists the wiring each service will need.
 
 ## Containerization conventions
 
-The four existing Dockerfiles set the pattern for the rest:
+The five existing Dockerfiles set the pattern for the rest:
 
 - **Multi-stage builds** — a build stage with the SDK or compiler, and a
   smaller runtime stage that carries only the output: `aspnet` and `jre` for
-  .NET and Java, distroless for Go (`static-debian12`) and Node.js
-  (`nodejs24-debian12`).
+  .NET and Java, distroless for Go (`static-debian12`), Node.js
+  (`nodejs24-debian12`) and Python (`python3-debian12`).
 - **Base images pinned by digest** — `image:tag@sha256:...`, using the digest
   of the multi-platform index (the top `Digest:` line of
   `docker buildx imagetools inspect <image>:<tag>`).
 - **Dependencies before source** — the dependency manifest (`cartservice.csproj`,
-  `build.gradle`, `go.mod` + `go.sum`, `package.json` + `package-lock.json`)
+  `build.gradle`, `go.mod` + `go.sum`, `package.json` + `package-lock.json`,
+  `requirements.txt`)
   is copied and restored first, so that layer stays cached until dependencies
   actually change.
 - **Non-root numeric user** — `USER 10001`, `USER 65532` on distroless, or
@@ -296,6 +310,12 @@ locked `pprof` 4.0.0 native module (used only by Google Cloud Profiler) does
 not compile on Node 24, so the build is skipped and the image sets
 `DISABLE_PROFILER=1`. Unsetting that variable makes the container crash at
 startup.
+
+Python: `emailservice` installs with `pip install --target=/app/deps` and the
+runtime stage sets `PYTHONPATH=/app/deps`, because a virtualenv does not
+survive the copy into distroless (Python lives at a different path there).
+Both stages must use the same Python minor version — 3.11, the one distroless
+Debian 12 ships — since `grpcio` and `markupsafe` are compiled per version.
 
 ## Roadmap
 

@@ -15,7 +15,7 @@ Consequences for how to work here:
 
 ## Current state
 
-Phase 1 (Containerize). Dockerfiles exist for `cartservice`, `adservice`, `checkoutservice`, and `currencyservice`; the other eight services and the compose file are still to do. The whole shop cannot be run yet.
+Phase 1 (Containerize). Dockerfiles exist for `cartservice`, `adservice`, `checkoutservice`, `currencyservice`, and `emailservice`; the other seven services and the compose file are still to do. The whole shop cannot be run yet.
 
 `.github/workflows/hello-ci.yml` is a starter that only lists `src/`. It runs on pushes to `master`, on PRs, and on manual dispatch.
 
@@ -37,6 +37,10 @@ docker build -t checkoutservice:dev src/checkoutservice
 # currencyservice — image sets PORT=7000 and DISABLE_PROFILER=1
 docker build -t currencyservice:dev src/currencyservice
 docker run --rm -p 7000:7000 currencyservice:dev
+
+# emailservice — image sets PORT=8080 and DISABLE_PROFILER=1; dummy mode, requests are only logged
+docker build -t emailservice:dev src/emailservice
+docker run --rm -p 8080:8080 emailservice:dev
 ```
 
 Smoke-test a gRPC service (no browser UI) against the shared proto:
@@ -61,17 +65,19 @@ The Java, Node.js, and Python services have no tests (`npm test` is a stub that 
 
 ## Dockerfile conventions
 
-The four existing Dockerfiles set the pattern; follow it for the remaining services, starting from the one in the same language where there is one:
+The five existing Dockerfiles set the pattern; follow it for the remaining services, starting from the one in the same language where there is one:
 
-- Multi-stage: build stage with the SDK/compiler, minimal runtime stage carrying only the output. Go uses `gcr.io/distroless/static-debian12:nonroot` (static binary, `CGO_ENABLED=0`); Node.js uses `node:24-bookworm-slim` to install and `gcr.io/distroless/nodejs24-debian12:nonroot` to run (same libc in both stages; `CMD ["server.js"]` because the image's entrypoint is already `node`).
+- Multi-stage: build stage with the SDK/compiler, minimal runtime stage carrying only the output. Go uses `gcr.io/distroless/static-debian12:nonroot` (static binary, `CGO_ENABLED=0`); Node.js uses `node:24-bookworm-slim` to install and `gcr.io/distroless/nodejs24-debian12:nonroot` to run (same libc in both stages; `CMD ["server.js"]` because the image's entrypoint is already `node`). Python uses `python:3.11-slim-bookworm` to install and `gcr.io/distroless/python3-debian12:nonroot` to run (`CMD ["email_server.py"]`, entrypoint is already `python3`).
 - Base images pinned by digest (`image:tag@sha256:...`), not tag alone. Use the index digest — the top `Digest:` line of `docker buildx imagetools inspect <image>:<tag>`. The entries under `Manifests:` with platform `unknown/unknown` are attestations and fail the build.
-- Dependency manifest copied and restored before the source, so the dependency layer stays cached (`cartservice.csproj` → `dotnet restore`; `build.gradle` → `./gradlew downloadRepos`, a task that exists in `build.gradle` for exactly this; `go.mod` + `go.sum` → `go mod download`; `package.json` + `package-lock.json` → `npm ci --omit=dev`).
+- Dependency manifest copied and restored before the source, so the dependency layer stays cached (`cartservice.csproj` → `dotnet restore`; `build.gradle` → `./gradlew downloadRepos`, a task that exists in `build.gradle` for exactly this; `go.mod` + `go.sum` → `go mod download`; `package.json` + `package-lock.json` → `npm ci --omit=dev`; `requirements.txt` → `pip install --no-cache-dir --target=/app/deps -r requirements.txt`).
 - Runtime runs as a non-root **numeric** UID (`USER 10001`, `USER 65532` on distroless, or `$APP_UID` on the .NET image) so Kubernetes `runAsNonRoot` can verify it.
 - `EXPOSE` plus the matching port env var (`PORT`, `ASPNETCORE_URLS`) set in the image.
 - A `.dockerignore` next to each Dockerfile, excluding build output, `node_modules/`, editor files, and the Dockerfile itself. It must not exclude files the service reads at runtime (`proto/`, `data/`).
 - Distroless images have no shell: use exec-form `ENTRYPOINT`/`CMD`, and check the user with `docker inspect -f '{{.Config.User}}'` rather than `docker exec`.
 
 Node-specific: `currencyservice` installs with `npm ci --omit=dev --ignore-scripts` and sets `ENV DISABLE_PROFILER=1` in the runtime stage. Its locked `pprof` 4.0.0 (a native module used only by Cloud Profiler) has no prebuilt binary for Node 24 and does not compile against it, so the install script is skipped; without `DISABLE_PROFILER` the container crashes at startup. `paymentservice` also depends on `pprof` (5.0.0) — check whether it builds before reusing this workaround.
+
+Python-specific: `emailservice` installs with `pip install --target=/app/deps` and sets `ENV PYTHONPATH=/app/deps` in the runtime stage — a virtualenv breaks when copied, because its interpreter symlink points at `/usr/local/bin/python` and distroless has Python at `/usr/bin/python3`. Both stages must be the same Python minor (3.11, what distroless Debian 12 ships): `grpcio` and `markupsafe` are compiled per version, and a mismatch shows up as an `ImportError` at startup. Also set `PYTHONUNBUFFERED=1` so logs reach `docker logs` immediately. `WORKDIR` must be the directory holding `templates/` — the template path is relative to the working directory and is loaded at startup. `recommendationservice` should follow the same layout.
 
 Before writing a service's Dockerfile, check its build file (`go.mod`, `package.json`, `requirements.txt`, `*.csproj`, `build.gradle`) for the runtime version.
 

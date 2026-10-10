@@ -1,0 +1,17 @@
+# Docker files themselves
+Dockerfile
+.dockerignore
+
+# Not needed to compile
+genproto.sh
+email_client.py
+requirements.in
+__pycache__/
+*.pyc
+.venv/
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+.DS_Store
