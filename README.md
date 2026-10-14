@@ -30,7 +30,7 @@ are placeholders that describe what will be built there.
 | Phase | Topic | State |
 |---|---|---|
 | 0 | Repo hygiene | Done — source only, upstream tooling removed |
-| 1 | Containerize | In progress — 5 of 12 services have a Dockerfile (`cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`); no compose file yet |
+| 1 | Containerize | In progress — 6 of 12 services have a Dockerfile (`cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`, `frontend`); no compose file yet |
 | 2 | Infra as Code | Not started — `infra/kubeadm-dev` and `infra/eks-prod` contain only a README |
 | 3 | CI | Starter only — `.github/workflows/hello-ci.yml` checks out the repo and lists `src/` |
 | 4 | Kubernetes manifests | Not started — `k8s/base` and `k8s/overlays/*` contain only a README |
@@ -172,6 +172,7 @@ src/                   Application source from upstream, plus the Dockerfiles wr
   checkoutservice/Dockerfile    Go service image
   currencyservice/Dockerfile    Node.js service image
   emailservice/Dockerfile       Python service image
+  frontend/Dockerfile           Go web frontend image (binary plus templates/ and static/)
 protos/                gRPC service definitions (needed to build src/*)
 infra/
   kubeadm-dev/         Scripts/Ansible to stand up the dev cluster with kubeadm   (planned)
@@ -261,6 +262,28 @@ grpcurl -plaintext -import-path protos -proto demo.proto \
   localhost:8080 hipstershop.EmailService/SendOrderConfirmation
 ```
 
+`frontend` — the only HTTP service. It exits at startup unless all eight
+backend addresses are set. They are deployment config, so the image only sets
+`PORT=8080`. Connections are made on the first request, so placeholders are
+enough to start it:
+
+```sh
+docker build -t frontend:dev src/frontend
+docker run --rm -p 8080:8080 \
+  -e PRODUCT_CATALOG_SERVICE_ADDR=localhost:1 -e CURRENCY_SERVICE_ADDR=localhost:1 \
+  -e CART_SERVICE_ADDR=localhost:1 -e RECOMMENDATION_SERVICE_ADDR=localhost:1 \
+  -e CHECKOUT_SERVICE_ADDR=localhost:1 -e SHIPPING_SERVICE_ADDR=localhost:1 \
+  -e AD_SERVICE_ADDR=localhost:1 -e SHOPPING_ASSISTANT_SERVICE_ADDR=localhost:1 \
+  frontend:dev
+
+curl localhost:8080/_healthz                          # ok
+curl -I localhost:8080/static/styles/styles.css      # 200: static files are in the image
+```
+
+Without the backends, `/` returns the shop's error page (HTTP 500). Off GCP it
+also logs a few `Failed to fetch ...` errors at startup while looking up
+cluster details from the GCP metadata server; they are harmless.
+
 ### Run the unit tests
 
 ```sh
@@ -278,13 +301,13 @@ The Java, Node.js, and Python services ship without unit tests.
 
 ### Running the whole shop
 
-Not possible yet. It needs the remaining seven Dockerfiles and the compose file
+Not possible yet. It needs the remaining six Dockerfiles and the compose file
 planned for Phase 1; the [configuration reference](#configuration-reference)
 lists the wiring each service will need.
 
 ## Containerization conventions
 
-The five existing Dockerfiles set the pattern for the rest:
+The six existing Dockerfiles set the pattern for the rest:
 
 - **Multi-stage builds** — a build stage with the SDK or compiler, and a
   smaller runtime stage that carries only the output: `aspnet` and `jre` for
@@ -316,6 +339,12 @@ runtime stage sets `PYTHONPATH=/app/deps`, because a virtualenv does not
 survive the copy into distroless (Python lives at a different path there).
 Both stages must use the same Python minor version — 3.11, the one distroless
 Debian 12 ships — since `grpcio` and `markupsafe` are compiled per version.
+
+Runtime files: `frontend` and `emailservice` read `templates/` (and the
+frontend also `static/`) by paths relative to the working directory, so those
+folders are copied next to the program and `WORKDIR` points there. A missing
+`templates/` crashes at startup; a missing `static/` only shows up as an
+unstyled page.
 
 ## Roadmap
 

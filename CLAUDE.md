@@ -15,7 +15,7 @@ Consequences for how to work here:
 
 ## Current state
 
-Phase 1 (Containerize). Dockerfiles exist for `cartservice`, `adservice`, `checkoutservice`, `currencyservice`, and `emailservice`; the other seven services and the compose file are still to do. The whole shop cannot be run yet.
+Phase 1 (Containerize). Dockerfiles exist for `cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`, and `frontend`; the other six services and the compose file are still to do. The whole shop cannot be run yet.
 
 `.github/workflows/hello-ci.yml` is a starter that only lists `src/`. It runs on pushes to `master`, on PRs, and on manual dispatch.
 
@@ -41,6 +41,16 @@ docker run --rm -p 7000:7000 currencyservice:dev
 # emailservice — image sets PORT=8080 and DISABLE_PROFILER=1; dummy mode, requests are only logged
 docker build -t emailservice:dev src/emailservice
 docker run --rm -p 8080:8080 emailservice:dev
+
+# frontend — HTTP; needs all eight *_SERVICE_ADDR vars (incl. SHOPPING_ASSISTANT); placeholders are enough to start it
+docker build -t frontend:dev src/frontend
+docker run --rm -p 8080:8080 \
+  -e PRODUCT_CATALOG_SERVICE_ADDR=localhost:1 -e CURRENCY_SERVICE_ADDR=localhost:1 \
+  -e CART_SERVICE_ADDR=localhost:1 -e RECOMMENDATION_SERVICE_ADDR=localhost:1 \
+  -e CHECKOUT_SERVICE_ADDR=localhost:1 -e SHIPPING_SERVICE_ADDR=localhost:1 \
+  -e AD_SERVICE_ADDR=localhost:1 -e SHOPPING_ASSISTANT_SERVICE_ADDR=localhost:1 \
+  frontend:dev
+curl localhost:8080/_healthz
 ```
 
 Smoke-test a gRPC service (no browser UI) against the shared proto:
@@ -65,7 +75,7 @@ The Java, Node.js, and Python services have no tests (`npm test` is a stub that 
 
 ## Dockerfile conventions
 
-The five existing Dockerfiles set the pattern; follow it for the remaining services, starting from the one in the same language where there is one:
+The six existing Dockerfiles set the pattern; follow it for the remaining services, starting from the one in the same language where there is one:
 
 - Multi-stage: build stage with the SDK/compiler, minimal runtime stage carrying only the output. Go uses `gcr.io/distroless/static-debian12:nonroot` (static binary, `CGO_ENABLED=0`); Node.js uses `node:24-bookworm-slim` to install and `gcr.io/distroless/nodejs24-debian12:nonroot` to run (same libc in both stages; `CMD ["server.js"]` because the image's entrypoint is already `node`). Python uses `python:3.11-slim-bookworm` to install and `gcr.io/distroless/python3-debian12:nonroot` to run (`CMD ["email_server.py"]`, entrypoint is already `python3`).
 - Base images pinned by digest (`image:tag@sha256:...`), not tag alone. Use the index digest — the top `Digest:` line of `docker buildx imagetools inspect <image>:<tag>`. The entries under `Manifests:` with platform `unknown/unknown` are attestations and fail the build.
@@ -78,6 +88,8 @@ The five existing Dockerfiles set the pattern; follow it for the remaining servi
 Node-specific: `currencyservice` installs with `npm ci --omit=dev --ignore-scripts` and sets `ENV DISABLE_PROFILER=1` in the runtime stage. Its locked `pprof` 4.0.0 (a native module used only by Cloud Profiler) has no prebuilt binary for Node 24 and does not compile against it, so the install script is skipped; without `DISABLE_PROFILER` the container crashes at startup. `paymentservice` also depends on `pprof` (5.0.0) — check whether it builds before reusing this workaround.
 
 Python-specific: `emailservice` installs with `pip install --target=/app/deps` and sets `ENV PYTHONPATH=/app/deps` in the runtime stage — a virtualenv breaks when copied, because its interpreter symlink points at `/usr/local/bin/python` and distroless has Python at `/usr/bin/python3`. Both stages must be the same Python minor (3.11, what distroless Debian 12 ships): `grpcio` and `markupsafe` are compiled per version, and a mismatch shows up as an `ImportError` at startup. Also set `PYTHONUNBUFFERED=1` so logs reach `docker logs` immediately. `WORKDIR` must be the directory holding `templates/` — the template path is relative to the working directory and is loaded at startup. `recommendationservice` should follow the same layout.
+
+Frontend-specific: besides the binary, the runtime stage copies `templates/` and `static/` into `/app` (the `WORKDIR`); both are opened by relative path. A missing `templates/` panics at startup, a missing `static/` silently serves an unstyled page — check `curl -I localhost:8080/static/styles/styles.css`. The `*_SERVICE_ADDR` values are deployment config and stay out of the image; only `PORT` is set. No `HEALTHCHECK` (distroless has no curl) — Kubernetes will probe `/_healthz`. Off GCP, startup logs a few harmless `Failed to fetch ...` errors from the GCP metadata lookup in `deployment_details.go`.
 
 Before writing a service's Dockerfile, check its build file (`go.mod`, `package.json`, `requirements.txt`, `*.csproj`, `build.gradle`) for the runtime version.
 
