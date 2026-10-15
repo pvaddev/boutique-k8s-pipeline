@@ -15,7 +15,7 @@ Consequences for how to work here:
 
 ## Current state
 
-Phase 1 (Containerize). Dockerfiles exist for `cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`, `frontend`, and `loadgenerator`; the other five services and the compose file are still to do. The whole shop cannot be run yet.
+Phase 1 (Containerize). Dockerfiles exist for `cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`, `frontend`, `loadgenerator`, and `productcatalogservice`; the other four services and the compose file are still to do. The whole shop cannot be run yet.
 
 `.github/workflows/hello-ci.yml` is a starter that only lists `src/`. It runs on pushes to `master`, on PRs, and on manual dispatch.
 
@@ -55,6 +55,11 @@ curl localhost:8080/_healthz
 # loadgenerator — headless Locust, 10 users; needs LOCUST_HOST (a dead address is fine for a smoke test)
 docker build -t loadgenerator:dev src/loadgenerator
 docker run --rm -e LOCUST_HOST=http://localhost:1 -e LOCUST_RUN_TIME=5s loadgenerator:dev
+
+# productcatalogservice — image sets PORT=3550 and DISABLE_PROFILER=1; fault injection via EXTRA_LATENCY and signals
+docker build -t productcatalogservice:dev src/productcatalogservice
+docker run --rm --name pcs -p 3550:3550 productcatalogservice:dev
+docker kill --signal SIGUSR1 pcs    # reload-per-request mode on (SIGUSR2 turns it off)
 ```
 
 Smoke-test a gRPC service (no browser UI) against the shared proto:
@@ -79,7 +84,7 @@ The Java, Node.js, and Python services have no tests (`npm test` is a stub that 
 
 ## Dockerfile conventions
 
-The seven existing Dockerfiles set the pattern; follow it for the remaining services, starting from the one in the same language where there is one:
+The eight existing Dockerfiles set the pattern; follow it for the remaining services, starting from the one in the same language where there is one:
 
 - Multi-stage: build stage with the SDK/compiler, minimal runtime stage carrying only the output. Go uses `gcr.io/distroless/static-debian12:nonroot` (static binary, `CGO_ENABLED=0`); Node.js uses `node:24-bookworm-slim` to install and `gcr.io/distroless/nodejs24-debian12:nonroot` to run (same libc in both stages; `CMD ["server.js"]` because the image's entrypoint is already `node`). Python uses `python:3.11-slim-bookworm` to install and `gcr.io/distroless/python3-debian12:nonroot` to run (`CMD ["email_server.py"]`, entrypoint is already `python3`).
 - Base images pinned by digest (`image:tag@sha256:...`), not tag alone. Use the index digest — the top `Digest:` line of `docker buildx imagetools inspect <image>:<tag>`. The entries under `Manifests:` with platform `unknown/unknown` are attestations and fail the build.
@@ -96,6 +101,8 @@ Python-specific: `emailservice` installs with `pip install --target=/app/deps` a
 Frontend-specific: besides the binary, the runtime stage copies `templates/` and `static/` into `/app` (the `WORKDIR`); both are opened by relative path. A missing `templates/` panics at startup, a missing `static/` silently serves an unstyled page — check `curl -I localhost:8080/static/styles/styles.css`. The `*_SERVICE_ADDR` values are deployment config and stay out of the image; only `PORT` is set. No `HEALTHCHECK` (distroless has no curl) — Kubernetes will probe `/_healthz`. Off GCP, startup logs a few harmless `Failed to fetch ...` errors from the GCP metadata lookup in `deployment_details.go`.
 
 Loadgenerator-specific: same Python layout as `emailservice` (all its pinned packages, incl. `gevent`/`greenlet`/`pyzmq`, have cp311 wheels). It runs `CMD ["-m", "locust"]` — the console script in `deps/bin/` is not on `PATH` and its shebang points at `/usr/local/bin/python`. Distroless has no shell to expand `$VARS` in `CMD`, so configuration is entirely `LOCUST_*` env vars: the image sets `LOCUST_HEADLESS=true`, `LOCUST_USERS=10`, `LOCUST_SPAWN_RATE=1`; `LOCUST_HOST` is deployment config and stays out. Without a host it does not exit — it logs `You must specify the base host` and idles. No `EXPOSE` (headless has no web UI). Locust logs to stderr, so `PYTHONUNBUFFERED` makes no difference here. Intended for the dev overlay only.
+
+Productcatalogservice-specific: the runtime stage copies `products.json` into `/app` next to the binary — it is read by relative path at startup (fatal if missing) and again per request in reload mode. Its profiler is **on by default** (`DISABLE_PROFILER == ""` starts it), unlike the other Go services where `ENABLE_PROFILER=1` turns it on, so the image sets `ENV DISABLE_PROFILER=1`. `EXTRA_LATENCY` is a runtime choice and stays out of the image. The `SIGUSR1`/`SIGUSR2` toggles need the binary as PID 1 (exec-form `ENTRYPOINT`); with no shell inside, send them with `docker kill --signal`.
 
 Before writing a service's Dockerfile, check its build file (`go.mod`, `package.json`, `requirements.txt`, `*.csproj`, `build.gradle`) for the runtime version.
 

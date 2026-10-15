@@ -30,7 +30,7 @@ are placeholders that describe what will be built there.
 | Phase | Topic | State |
 |---|---|---|
 | 0 | Repo hygiene | Done — source only, upstream tooling removed |
-| 1 | Containerize | In progress — 7 of 12 services have a Dockerfile (`cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`, `frontend`, `loadgenerator`); no compose file yet |
+| 1 | Containerize | In progress — 8 of 12 services have a Dockerfile (`cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`, `frontend`, `loadgenerator`, `productcatalogservice`); no compose file yet |
 | 2 | Infra as Code | Not started — `infra/kubeadm-dev` and `infra/eks-prod` contain only a README |
 | 3 | CI | Starter only — `.github/workflows/hello-ci.yml` checks out the repo and lists `src/` |
 | 4 | Kubernetes manifests | Not started — `k8s/base` and `k8s/overlays/*` contain only a README |
@@ -50,7 +50,7 @@ subject for practising multi-service builds and deployments.
 |---|---|---|---|---|
 | `frontend` | Go 1.25 | HTTP | 8080 | Serves the website and calls every backend service. Health endpoint: `/_healthz` |
 | `cartservice` | C# / .NET 10 | gRPC | 7070 (set in its Dockerfile) | Stores and retrieves a user's cart, in Redis or in memory |
-| `productcatalogservice` | Go 1.25 | gRPC | 3550 | Lists, fetches, and searches products from `products.json` |
+| `productcatalogservice` | Go 1.25 | gRPC | 3550 (set in its Dockerfile) | Lists, fetches, and searches products from `products.json` |
 | `currencyservice` | Node.js 24 | gRPC | none in the source — `PORT` is required; its Dockerfile sets 7000 | Converts money between currencies using a static rates file |
 | `paymentservice` | Node.js | gRPC | none — `PORT` is required | Mock-charges a credit card and returns a transaction ID |
 | `shippingservice` | Go 1.25 | gRPC | 50051 | Returns a shipping quote and a mock tracking ID |
@@ -175,6 +175,7 @@ src/                   Application source from upstream, plus the Dockerfiles wr
   emailservice/Dockerfile       Python service image
   frontend/Dockerfile           Go web frontend image (binary plus templates/ and static/)
   loadgenerator/Dockerfile      Python Locust image (headless traffic generator)
+  productcatalogservice/Dockerfile  Go service image (binary plus products.json)
 protos/                gRPC service definitions (needed to build src/*)
 infra/
   kubeadm-dev/         Scripts/Ansible to stand up the dev cluster with kubeadm   (planned)
@@ -299,6 +300,22 @@ docker run --rm -e LOCUST_HOST=http://localhost:1 -e LOCUST_RUN_TIME=5s loadgene
 docker run --rm --network host -e LOCUST_HOST=http://localhost:8080 loadgenerator:dev
 ```
 
+`productcatalogservice` — the image sets `PORT=3550` and `DISABLE_PROFILER=1`
+(its profiler is on unless that variable is set). It serves the catalog from
+`products.json`, copied next to the binary. Fault injection for later phases:
+
+```sh
+docker build -t productcatalogservice:dev src/productcatalogservice
+docker run --rm --name pcs -p 3550:3550 productcatalogservice:dev
+
+grpcurl -plaintext -import-path protos -proto demo.proto \
+  localhost:3550 hipstershop.ProductCatalogService/ListProducts
+
+docker run --rm -p 3550:3550 -e EXTRA_LATENCY=2s productcatalogservice:dev  # every response ~2s slower
+docker kill --signal SIGUSR1 pcs    # re-read products.json on every request (slow mode)
+docker kill --signal SIGUSR2 pcs    # back to normal
+```
+
 ### Run the unit tests
 
 ```sh
@@ -316,13 +333,13 @@ The Java, Node.js, and Python services ship without unit tests.
 
 ### Running the whole shop
 
-Not possible yet. It needs the remaining five Dockerfiles and the compose file
+Not possible yet. It needs the remaining four Dockerfiles and the compose file
 planned for Phase 1; the [configuration reference](#configuration-reference)
 lists the wiring each service will need.
 
 ## Containerization conventions
 
-The seven existing Dockerfiles set the pattern for the rest:
+The eight existing Dockerfiles set the pattern for the rest:
 
 - **Multi-stage builds** — a build stage with the SDK or compiler, and a
   smaller runtime stage that carries only the output: `aspnet` and `jre` for
@@ -366,6 +383,10 @@ Configuration without a shell: distroless cannot expand `$VARS` in `CMD`, so
 the `LOCUST_*` environment variables that Locust reads itself. The image sets
 `LOCUST_HEADLESS=true` and default user counts; `LOCUST_HOST` comes from the
 deployment.
+
+Signals: `productcatalogservice` switches its slow reload mode on `SIGUSR1` and
+`SIGUSR2`, so its `ENTRYPOINT` is exec form and the binary runs as PID 1 —
+`docker kill --signal` (and later `kubectl`) reaches it directly.
 
 ## Roadmap
 
