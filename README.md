@@ -30,7 +30,7 @@ are placeholders that describe what will be built there.
 | Phase | Topic | State |
 |---|---|---|
 | 0 | Repo hygiene | Done — source only, upstream tooling removed |
-| 1 | Containerize | In progress — 8 of 12 services have a Dockerfile (`cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`, `frontend`, `loadgenerator`, `productcatalogservice`); no compose file yet |
+| 1 | Containerize | In progress — 9 of 12 services have a Dockerfile (`cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`, `frontend`, `loadgenerator`, `productcatalogservice`, `shippingservice`); no compose file yet |
 | 2 | Infra as Code | Not started — `infra/kubeadm-dev` and `infra/eks-prod` contain only a README |
 | 3 | CI | Starter only — `.github/workflows/hello-ci.yml` checks out the repo and lists `src/` |
 | 4 | Kubernetes manifests | Not started — `k8s/base` and `k8s/overlays/*` contain only a README |
@@ -53,7 +53,7 @@ subject for practising multi-service builds and deployments.
 | `productcatalogservice` | Go 1.25 | gRPC | 3550 (set in its Dockerfile) | Lists, fetches, and searches products from `products.json` |
 | `currencyservice` | Node.js 24 | gRPC | none in the source — `PORT` is required; its Dockerfile sets 7000 | Converts money between currencies using a static rates file |
 | `paymentservice` | Node.js | gRPC | none — `PORT` is required | Mock-charges a credit card and returns a transaction ID |
-| `shippingservice` | Go 1.25 | gRPC | 50051 | Returns a shipping quote and a mock tracking ID |
+| `shippingservice` | Go 1.25 | gRPC | 50051 (set in its Dockerfile) | Returns a shipping quote and a mock tracking ID |
 | `emailservice` | Python 3.11 | gRPC | 8080 | Sends an order confirmation (runs in dummy mode: it only logs) |
 | `checkoutservice` | Go 1.25 | gRPC | 5050 | Orchestrates an order: cart, pricing, payment, shipping, email |
 | `recommendationservice` | Python | gRPC | 8080 | Suggests other products based on what is in the cart |
@@ -176,6 +176,7 @@ src/                   Application source from upstream, plus the Dockerfiles wr
   frontend/Dockerfile           Go web frontend image (binary plus templates/ and static/)
   loadgenerator/Dockerfile      Python Locust image (headless traffic generator)
   productcatalogservice/Dockerfile  Go service image (binary plus products.json)
+  shippingservice/Dockerfile    Go service image
 protos/                gRPC service definitions (needed to build src/*)
 infra/
   kubeadm-dev/         Scripts/Ansible to stand up the dev cluster with kubeadm   (planned)
@@ -316,6 +317,21 @@ docker kill --signal SIGUSR1 pcs    # re-read products.json on every request (sl
 docker kill --signal SIGUSR2 pcs    # back to normal
 ```
 
+`shippingservice` — the image sets `PORT=50051` and `DISABLE_PROFILER`,
+`DISABLE_TRACING`, `DISABLE_STATS` to `1`. Only the profiler switch has an
+effect; tracing and stats are unimplemented stubs, and the other two just keep
+the startup logs accurate. It registers gRPC reflection, so `grpcurl` needs no
+proto files:
+
+```sh
+docker build -t shippingservice:dev src/shippingservice
+docker run --rm -p 50051:50051 shippingservice:dev
+
+grpcurl -plaintext localhost:50051 list
+grpcurl -plaintext -d '{"address": {"street_address": "1 Main St", "city": "Springfield", "state": "IL"}}' \
+  localhost:50051 hipstershop.ShippingService/ShipOrder
+```
+
 ### Run the unit tests
 
 ```sh
@@ -333,13 +349,13 @@ The Java, Node.js, and Python services ship without unit tests.
 
 ### Running the whole shop
 
-Not possible yet. It needs the remaining four Dockerfiles and the compose file
+Not possible yet. It needs the remaining three Dockerfiles and the compose file
 planned for Phase 1; the [configuration reference](#configuration-reference)
 lists the wiring each service will need.
 
 ## Containerization conventions
 
-The eight existing Dockerfiles set the pattern for the rest:
+The nine existing Dockerfiles set the pattern for the rest:
 
 - **Multi-stage builds** — a build stage with the SDK or compiler, and a
   smaller runtime stage that carries only the output: `aspnet` and `jre` for
@@ -386,7 +402,9 @@ deployment.
 
 Signals: `productcatalogservice` switches its slow reload mode on `SIGUSR1` and
 `SIGUSR2`, so its `ENTRYPOINT` is exec form and the binary runs as PID 1 —
-`docker kill --signal` (and later `kubectl`) reaches it directly.
+`docker kill --signal` reaches it directly. The same applies to every image:
+with a shell in between, `docker stop` (and Kubernetes pod shutdown) would
+send SIGTERM to the shell instead of the service.
 
 ## Roadmap
 
