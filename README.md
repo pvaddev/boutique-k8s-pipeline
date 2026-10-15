@@ -30,7 +30,7 @@ are placeholders that describe what will be built there.
 | Phase | Topic | State |
 |---|---|---|
 | 0 | Repo hygiene | Done — source only, upstream tooling removed |
-| 1 | Containerize | In progress — 6 of 12 services have a Dockerfile (`cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`, `frontend`); no compose file yet |
+| 1 | Containerize | In progress — 7 of 12 services have a Dockerfile (`cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`, `frontend`, `loadgenerator`); no compose file yet |
 | 2 | Infra as Code | Not started — `infra/kubeadm-dev` and `infra/eks-prod` contain only a README |
 | 3 | CI | Starter only — `.github/workflows/hello-ci.yml` checks out the repo and lists `src/` |
 | 4 | Kubernetes manifests | Not started — `k8s/base` and `k8s/overlays/*` contain only a README |
@@ -58,7 +58,7 @@ subject for practising multi-service builds and deployments.
 | `checkoutservice` | Go 1.25 | gRPC | 5050 | Orchestrates an order: cart, pricing, payment, shipping, email |
 | `recommendationservice` | Python | gRPC | 8080 | Suggests other products based on what is in the cart |
 | `adservice` | Java 21 (Gradle 8) | gRPC | 9555 | Returns text ads matched to context keywords |
-| `loadgenerator` | Python (Locust) | HTTP client | — | Simulates shoppers hitting the frontend |
+| `loadgenerator` | Python 3.11 (Locust) | HTTP client | — | Simulates shoppers hitting the frontend |
 | `shoppingassistantservice` | Python (Flask) | HTTP | 8080 | AI shopping assistant; needs Google Cloud (see below) |
 
 ### How the services call each other
@@ -134,6 +134,7 @@ process exits at startup without it. Addresses are `host:port`.
 | `shippingservice` | — | `PORT`, `DISABLE_TRACING`, `DISABLE_PROFILER`, `DISABLE_STATS` |
 | `emailservice` | — | `PORT`, `ENABLE_TRACING`, `DISABLE_PROFILER` |
 | `adservice` | — | `PORT`, `DISABLE_TRACING`, `DISABLE_STATS` |
+| `loadgenerator` | — (but without `LOCUST_HOST` it only logs errors and sends no traffic) | `LOCUST_HOST`, `LOCUST_USERS`, `LOCUST_SPAWN_RATE`, `LOCUST_HEADLESS`, `LOCUST_RUN_TIME`, and any other Locust option as `LOCUST_*` |
 | `shoppingassistantservice` | `PROJECT_ID`, `REGION`, `ALLOYDB_DATABASE_NAME`, `ALLOYDB_TABLE_NAME`, `ALLOYDB_CLUSTER_NAME`, `ALLOYDB_INSTANCE_NAME`, `ALLOYDB_SECRET_NAME` | — |
 
 Tracing: when `ENABLE_TRACING=1`, services export OpenTelemetry spans to
@@ -173,6 +174,7 @@ src/                   Application source from upstream, plus the Dockerfiles wr
   currencyservice/Dockerfile    Node.js service image
   emailservice/Dockerfile       Python service image
   frontend/Dockerfile           Go web frontend image (binary plus templates/ and static/)
+  loadgenerator/Dockerfile      Python Locust image (headless traffic generator)
 protos/                gRPC service definitions (needed to build src/*)
 infra/
   kubeadm-dev/         Scripts/Ansible to stand up the dev cluster with kubeadm   (planned)
@@ -284,6 +286,19 @@ Without the backends, `/` returns the shop's error page (HTTP 500). Off GCP it
 also logs a few `Failed to fetch ...` errors at startup while looking up
 cluster details from the GCP metadata server; they are harmless.
 
+`loadgenerator` — runs Locust headless with 10 users (spawned 1 per second)
+until stopped. The target is deployment config, so the image does not set it;
+pass `LOCUST_HOST`. Against a dead address it prints a table of
+`ConnectionRefusedError`s, which is enough to check the image:
+
+```sh
+docker build -t loadgenerator:dev src/loadgenerator
+docker run --rm -e LOCUST_HOST=http://localhost:1 -e LOCUST_RUN_TIME=5s loadgenerator:dev
+
+# against a frontend running on the host
+docker run --rm --network host -e LOCUST_HOST=http://localhost:8080 loadgenerator:dev
+```
+
 ### Run the unit tests
 
 ```sh
@@ -301,13 +316,13 @@ The Java, Node.js, and Python services ship without unit tests.
 
 ### Running the whole shop
 
-Not possible yet. It needs the remaining six Dockerfiles and the compose file
+Not possible yet. It needs the remaining five Dockerfiles and the compose file
 planned for Phase 1; the [configuration reference](#configuration-reference)
 lists the wiring each service will need.
 
 ## Containerization conventions
 
-The six existing Dockerfiles set the pattern for the rest:
+The seven existing Dockerfiles set the pattern for the rest:
 
 - **Multi-stage builds** — a build stage with the SDK or compiler, and a
   smaller runtime stage that carries only the output: `aspnet` and `jre` for
@@ -345,6 +360,12 @@ frontend also `static/`) by paths relative to the working directory, so those
 folders are copied next to the program and `WORKDIR` points there. A missing
 `templates/` crashes at startup; a missing `static/` only shows up as an
 unstyled page.
+
+Configuration without a shell: distroless cannot expand `$VARS` in `CMD`, so
+`loadgenerator` runs `CMD ["-m", "locust"]` and is configured entirely through
+the `LOCUST_*` environment variables that Locust reads itself. The image sets
+`LOCUST_HEADLESS=true` and default user counts; `LOCUST_HOST` comes from the
+deployment.
 
 ## Roadmap
 

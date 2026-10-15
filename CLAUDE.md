@@ -15,7 +15,7 @@ Consequences for how to work here:
 
 ## Current state
 
-Phase 1 (Containerize). Dockerfiles exist for `cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`, and `frontend`; the other six services and the compose file are still to do. The whole shop cannot be run yet.
+Phase 1 (Containerize). Dockerfiles exist for `cartservice`, `adservice`, `checkoutservice`, `currencyservice`, `emailservice`, `frontend`, and `loadgenerator`; the other five services and the compose file are still to do. The whole shop cannot be run yet.
 
 `.github/workflows/hello-ci.yml` is a starter that only lists `src/`. It runs on pushes to `master`, on PRs, and on manual dispatch.
 
@@ -51,6 +51,10 @@ docker run --rm -p 8080:8080 \
   -e AD_SERVICE_ADDR=localhost:1 -e SHOPPING_ASSISTANT_SERVICE_ADDR=localhost:1 \
   frontend:dev
 curl localhost:8080/_healthz
+
+# loadgenerator — headless Locust, 10 users; needs LOCUST_HOST (a dead address is fine for a smoke test)
+docker build -t loadgenerator:dev src/loadgenerator
+docker run --rm -e LOCUST_HOST=http://localhost:1 -e LOCUST_RUN_TIME=5s loadgenerator:dev
 ```
 
 Smoke-test a gRPC service (no browser UI) against the shared proto:
@@ -75,7 +79,7 @@ The Java, Node.js, and Python services have no tests (`npm test` is a stub that 
 
 ## Dockerfile conventions
 
-The six existing Dockerfiles set the pattern; follow it for the remaining services, starting from the one in the same language where there is one:
+The seven existing Dockerfiles set the pattern; follow it for the remaining services, starting from the one in the same language where there is one:
 
 - Multi-stage: build stage with the SDK/compiler, minimal runtime stage carrying only the output. Go uses `gcr.io/distroless/static-debian12:nonroot` (static binary, `CGO_ENABLED=0`); Node.js uses `node:24-bookworm-slim` to install and `gcr.io/distroless/nodejs24-debian12:nonroot` to run (same libc in both stages; `CMD ["server.js"]` because the image's entrypoint is already `node`). Python uses `python:3.11-slim-bookworm` to install and `gcr.io/distroless/python3-debian12:nonroot` to run (`CMD ["email_server.py"]`, entrypoint is already `python3`).
 - Base images pinned by digest (`image:tag@sha256:...`), not tag alone. Use the index digest — the top `Digest:` line of `docker buildx imagetools inspect <image>:<tag>`. The entries under `Manifests:` with platform `unknown/unknown` are attestations and fail the build.
@@ -90,6 +94,8 @@ Node-specific: `currencyservice` installs with `npm ci --omit=dev --ignore-scrip
 Python-specific: `emailservice` installs with `pip install --target=/app/deps` and sets `ENV PYTHONPATH=/app/deps` in the runtime stage — a virtualenv breaks when copied, because its interpreter symlink points at `/usr/local/bin/python` and distroless has Python at `/usr/bin/python3`. Both stages must be the same Python minor (3.11, what distroless Debian 12 ships): `grpcio` and `markupsafe` are compiled per version, and a mismatch shows up as an `ImportError` at startup. Also set `PYTHONUNBUFFERED=1` so logs reach `docker logs` immediately. `WORKDIR` must be the directory holding `templates/` — the template path is relative to the working directory and is loaded at startup. `recommendationservice` should follow the same layout.
 
 Frontend-specific: besides the binary, the runtime stage copies `templates/` and `static/` into `/app` (the `WORKDIR`); both are opened by relative path. A missing `templates/` panics at startup, a missing `static/` silently serves an unstyled page — check `curl -I localhost:8080/static/styles/styles.css`. The `*_SERVICE_ADDR` values are deployment config and stay out of the image; only `PORT` is set. No `HEALTHCHECK` (distroless has no curl) — Kubernetes will probe `/_healthz`. Off GCP, startup logs a few harmless `Failed to fetch ...` errors from the GCP metadata lookup in `deployment_details.go`.
+
+Loadgenerator-specific: same Python layout as `emailservice` (all its pinned packages, incl. `gevent`/`greenlet`/`pyzmq`, have cp311 wheels). It runs `CMD ["-m", "locust"]` — the console script in `deps/bin/` is not on `PATH` and its shebang points at `/usr/local/bin/python`. Distroless has no shell to expand `$VARS` in `CMD`, so configuration is entirely `LOCUST_*` env vars: the image sets `LOCUST_HEADLESS=true`, `LOCUST_USERS=10`, `LOCUST_SPAWN_RATE=1`; `LOCUST_HOST` is deployment config and stays out. Without a host it does not exit — it logs `You must specify the base host` and idles. No `EXPOSE` (headless has no web UI). Locust logs to stderr, so `PYTHONUNBUFFERED` makes no difference here. Intended for the dev overlay only.
 
 Before writing a service's Dockerfile, check its build file (`go.mod`, `package.json`, `requirements.txt`, `*.csproj`, `build.gradle`) for the runtime version.
 
